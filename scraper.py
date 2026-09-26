@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import json
 import socket
 import argparse
 from pathlib import Path
@@ -220,33 +221,72 @@ def save_proxy_file(file_path: Path, proxies: Set[str]) -> int:
 
 
 def update_timestamp_file(counts: Dict[str, int], duration: float):
-    """Memperbarui file last_updated.txt dengan timestamp UTC dan WIB."""
+    """
+    Memperbarui file last_updated.txt dengan format JSON machine-parseable
+    diikuti human-readable summary (UTC + WIB).
+
+    Format JSON:
+    {
+      "updated_at_utc": "2025-01-01T00:00:00Z",
+      "updated_at_wib": "2025-01-01T07:00:00+07:00",
+      "duration_seconds": 12.34,
+      "proxy_counts": {
+        "http": 1234,
+        "socks4": 567,
+        "socks5": 890
+      },
+      "total": 2691,
+      "status": "success"
+    }
+    """
     now_utc = datetime.now(timezone.utc)
     wib_tz = timezone(timedelta(hours=7))
     now_wib = now_utc.astimezone(wib_tz)
 
+    total_proxies = sum(counts.values())
+
+    # Machine-parseable JSON block
+    json_data = {
+        "updated_at_utc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at_wib": now_wib.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
+        "duration_seconds": round(duration, 2),
+        "proxy_counts": {
+            "http": counts.get("http", 0),
+            "socks4": counts.get("socks4", 0),
+            "socks5": counts.get("socks5", 0),
+        },
+        "total": total_proxies,
+        "status": "success",
+    }
+
     str_utc = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
     str_wib = now_wib.strftime("%Y-%m-%d %H:%M:%S WIB")
 
-    total_proxies = sum(counts.values())
+    content = (
+        "### MACHINE-PARSEABLE JSON (parseable by scripts) ###\n"
+        + json.dumps(json_data, indent=2)
+        + "\n\n"
+        "### HUMAN-READABLE SUMMARY ###\n"
+        "══════════════════════════════════════════════════════════════\n"
+        "          Proxy Scraper - Status Pembaruan Terakhir\n"
+        "══════════════════════════════════════════════════════════════\n"
+        f"Waktu Update (UTC) : {str_utc}\n"
+        f"Waktu Update (WIB) : {str_wib}\n"
+        f"Durasi Scrape      : {duration:.2f} detik\n"
+        "══════════════════════════════════════════════════════════════\n"
+        "Statistik Proxy:\n"
+        f"- HTTP / HTTPS     : {counts.get('http', 0):>6} proxy\n"
+        f"- SOCKS4           : {counts.get('socks4', 0):>6} proxy\n"
+        f"- SOCKS5           : {counts.get('socks5', 0):>6} proxy\n"
+        "--------------------------------------------------\n"
+        f"Total Keseluruhan  : {total_proxies:>6} proxy\n"
+        "Status Otomasi     : Berhasil Diperbarui\n"
+        "══════════════════════════════════════════════════════════════\n"
+    )
 
-    content = f"""# Proxy Scraper - Status Pembaruan Terakhir
-==================================================
-Waktu Update (UTC) : {str_utc}
-Waktu Update (WIB) : {str_wib}
-Durasi Scrape      : {duration:.2f} detik
-==================================================
-Statistik Proxy:
-- HTTP / HTTPS     : {counts.get('http', 0):>6} proxy
-- SOCKS4           : {counts.get('socks4', 0):>6} proxy
-- SOCKS5           : {counts.get('socks5', 0):>6} proxy
---------------------------------------------------
-Total Keseluruhan  : {total_proxies:>6} proxy
-Status Otomasi     : Berhasil Diperbarui
-==================================================
-"""
     with open(BASE_DIR / "last_updated.txt", "w", encoding="utf-8") as f:
         f.write(content)
+
 
 
 def main():
