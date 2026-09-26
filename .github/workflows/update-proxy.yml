@@ -1,0 +1,47 @@
+name: Automated Proxy Scraper
+
+on:
+  schedule:
+    # Catatan: Sintaks cron '* * * * *' menargetkan interval 1 menit.
+    # Namun secara internal, GitHub Actions membatasi jadwal minimum rata-rata ~5 menit
+    # karena kebijakan antrean resource gratis GitHub Actions.
+    - cron: '* * * * *'
+  workflow_dispatch: # Mengizinkan eksekusi manual kapan saja via tombol Run Workflow
+
+permissions:
+  contents: write
+
+jobs:
+  scrape-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Proxy Scraper
+        run: |
+          python scraper.py
+
+      - name: Commit and push changes if updated
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add http.txt socks4.txt socks5.txt last_updated.txt
+          if git diff --staged --quiet; then
+            echo "Tidak ada perubahan daftar proxy pada iterasi ini."
+          else
+            git commit -m "chore(auto-update): sync latest proxies [skip ci]"
+            git push origin main
+          fi
