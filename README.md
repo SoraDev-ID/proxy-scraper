@@ -131,23 +131,9 @@ python scraper.py --check --timeout 1.5 --workers 150
 
 ---
 
-## ℹ️ Catatan Mengenai Interval 1 Menit di GitHub Actions
+## ℹ️ Jadwal Pembaruan Otomatis
 
-Workflow ini dikonfigurasikan dengan sintaks cron `* * * * *` (setiap 1 menit). Namun, penting untuk dipahami:
-
-> ⚠️ **Limitasi Resmi GitHub Actions:**  
-> GitHub membatasi interval minimum cron terjadwal gratis rata-rata **sekali per 5 menit** *(dan dapat terjadi antrian tambahan beberapa menit pada jam sibuk server GitHub)*. Sintaks `* * * * *` akan dijalankan oleh GitHub setiap ~5 menit.
-
-### 💡 Alternatif jika Anda BENAR-BENAR membutuhkan update per 1 menit:
-1. **Cron di VPS / Server Kecil Pribadi (Paling Direkomendasikan)**:
-   Gunakan VPS Linux murah (DigitalOcean, Contabo, AWS Lightsail) dan pasang cron job:
-   ```cron
-   * * * * * cd /home/user/proxy-scraper && python scraper.py && git add . && git commit -m "auto-update" && git push origin main
-   ```
-2. **Self-Hosted GitHub Runner**:
-   Pasang GitHub Runner di server/PC lokal Anda sendiri sehingga eksekusi tidak bergantung pada antrian publik GitHub.
-3. **Eksternal Webhook / Cron Service**:
-   Gunakan layanan gratis seperti *cron-job.org* atau *EasyCron* yang menembak API GitHub `repository_dispatch` setiap 1 menit.
+Workflow auto-updater dijalankan secara terjadwal setiap **5 menit** (`*/5 * * * *`) sesuai interval minimum resmi GitHub Actions. Selain jadwal otomatis bawaan, pembaruan juga dapat dipicu secara manual melalui tab **Actions** (`workflow_dispatch`) atau melalui webhook eksternal (`repository_dispatch`). Panduan setup webhook 1 menit dapat dilihat di [docs/external-cron.md](docs/external-cron.md).
 
 ---
 

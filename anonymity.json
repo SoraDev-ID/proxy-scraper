@@ -1,0 +1,13 @@
+{
+  "updated_at_utc": "2026-09-27T20:48:53Z",
+  "total_classified": 2,
+  "summary": {
+    "anonymous": 2
+  },
+  "anonymity": {
+    "socks4": {
+      "142.54.235.9:4145": "anonymous",
+      "98.190.239.3:4145": "anonymous"
+    }
+  }
+}

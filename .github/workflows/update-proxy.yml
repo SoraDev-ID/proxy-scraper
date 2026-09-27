@@ -5,7 +5,7 @@ on:
   repository_dispatch:
     types: [update-proxy]
   schedule:
-    - cron: '*/20 * * * *'
+    - cron: '*/5 * * * *'
 
 concurrency:
   group: proxy-update
@@ -36,13 +36,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Proxy Scraper
-        run: python scraper.py --check --timeout 1.5 --workers 150
+        run: python scraper.py --check --timeout 2.0 --workers 150
 
       - name: Commit and push changes if updated
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add http.txt socks4.txt socks5.txt last_updated.txt
+          [ -f anonymity.json ] && git add anonymity.json
           if git diff --staged --quiet; then
             echo "Tidak ada perubahan pada iterasi ini."
             exit 0

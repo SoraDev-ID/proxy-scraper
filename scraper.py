@@ -3,7 +3,7 @@
 Automated Free Proxy Scraper & Verifier
 Author: SoraDev-ID
 Description: Mengambil daftar proxy publik (HTTP, SOCKS4, SOCKS5) dari berbagai sumber terpercaya,
-             membersihkan duplikat, memvalidasi format IP:PORT, dan melakukan verifikasi cepat.
+             membersihkan duplikat, memvalidasi format IP:PORT publik, dan melakukan verifikasi fungsional HTTP GET.
 """
 
 import os
@@ -12,6 +12,7 @@ import sys
 import time
 import json
 import socket
+import ipaddress
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -38,6 +39,9 @@ except ImportError:
 
 # Direktori proyek
 BASE_DIR = Path(__file__).resolve().parent
+
+# Target endpoint ringan untuk validasi fungsional proxy
+CHECK_TARGET_URL = "http://httpbin.org/ip"
 
 # Daftar Sumber Proxy Publik Gratis & Aktif
 PROXY_SOURCES: Dict[str, List[str]] = {
@@ -92,8 +96,9 @@ def create_session() -> requests.Session:
 def is_valid_proxy(proxy_str: str) -> bool:
     """
     Validasi ketat format IPv4:PORT.
-    - Format 4 oktet IP 0-255 (tanpa leading zeros aneh, oktet pertama bukan 0 atau 127)
-    - Port antara 1 sampai 65535
+    - Format IPv4 publik valid (menolak private, reserved, multicast, link-local, loopback, unspecified).
+    - Port antara 1 sampai 65535.
+    - Menolak leading zero pada oktet IP (misal 01.2.3.4).
     """
     if not proxy_str or ":" not in proxy_str:
         return False
@@ -111,18 +116,23 @@ def is_valid_proxy(proxy_str: str) -> bool:
         if len(octets) != 4:
             return False
 
-        first_octet = int(octets[0])
-        # Filter IP loopback/reserved/nol
-        if first_octet == 0 or first_octet == 127:
-            return False
-
+        # Hindari leading zero pada setiap oktet (misal "01.2.3.4")
         for octet in octets:
-            val = int(octet)
-            if not (0 <= val <= 255):
-                return False
-            # Hindari leading zero (misal "01.2.3.4")
             if len(octet) > 1 and octet.startswith("0"):
                 return False
+
+        # Validasi ketat range menggunakan modul ipaddress
+        ip_obj = ipaddress.ip_address(ip)
+        if (
+            ip_obj.version != 4
+            or ip_obj.is_private
+            or ip_obj.is_reserved
+            or ip_obj.is_multicast
+            or ip_obj.is_link_local
+            or ip_obj.is_loopback
+            or ip_obj.is_unspecified
+        ):
+            return False
 
         return True
     except (ValueError, TypeError):
@@ -130,7 +140,7 @@ def is_valid_proxy(proxy_str: str) -> bool:
 
 
 def fetch_source_proxies(session: requests.Session, url: str) -> Set[str]:
-    """Mengambil dan memfilter proxy dari satu URL sumber."""
+    """Mengambil dan memfilter proxy dari satu URL sumber dengan penanganan error dan logging."""
     proxies = set()
     try:
         resp = session.get(url, timeout=10)
@@ -138,7 +148,6 @@ def fetch_source_proxies(session: requests.Session, url: str) -> Set[str]:
             lines = resp.text.splitlines()
             for line in lines:
                 candidate = line.strip()
-                # Ekstrak substring jika baris memuat teks lain
                 if "://" in candidate:
                     candidate = candidate.split("://")[-1]
                 if "/" in candidate:
@@ -146,8 +155,12 @@ def fetch_source_proxies(session: requests.Session, url: str) -> Set[str]:
 
                 if is_valid_proxy(candidate):
                     proxies.add(candidate)
-    except Exception:
-        pass
+        else:
+            print(f"  [!] HTTP {resp.status_code} saat mengakses sumber: {url}")
+    except requests.exceptions.RequestException as e:
+        print(f"  [!] Gagal request sumber {url}: {type(e).__name__} ({e})")
+    except Exception as e:
+        print(f"  [!] Kesalahan memproses sumber {url}: {type(e).__name__} ({e})")
     return proxies
 
 
@@ -155,7 +168,7 @@ def scrape_protocol(session: requests.Session, protocol: str) -> Set[str]:
     """Mengambil seluruh proxy untuk satu protokol dari seluruh URL sumber."""
     urls = PROXY_SOURCES.get(protocol, [])
     all_proxies = set()
-    print(f"[*] Mengambil proxy {protocol.upper()} dari {len(urls)} sumber...", end=" ", flush=True)
+    print(f"[*] Mengambil proxy {protocol.upper()} dari {len(urls)} sumber...", flush=True)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(fetch_source_proxies, session, url): url for url in urls}
@@ -163,52 +176,89 @@ def scrape_protocol(session: requests.Session, protocol: str) -> Set[str]:
             try:
                 res = future.result()
                 all_proxies.update(res)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  [!] Worker exception: {e}")
 
-    print(f"[✓ OK] Ditemukan {len(all_proxies)} unik.")
+    print(f"[✓ OK] Ditemukan {len(all_proxies)} proxy {protocol.upper()} unik.")
     return all_proxies
 
 
-def check_single_proxy(proxy_str: str, timeout: float) -> Tuple[str, bool]:
+def check_single_proxy(proxy_str: str, protocol_or_timeout: object = "http", timeout: float = 2.0) -> Tuple[str, bool, str]:
     """
-    Melakukan pemeriksaan konektivitas TCP cepat ke IP:PORT proxy.
-    Mengembalikan tuple (proxy_str, is_alive).
+    Melakukan verifikasi fungsional HTTP GET melalui proxy ke target URL.
+    Mengembalikan tuple (proxy_str, is_alive, anonymity_level).
+    - Mendukung protokol 'http', 'socks4', dan 'socks5'.
+    - Anonymity: 'transparent', 'anonymous', atau 'elite'.
     """
+    if isinstance(protocol_or_timeout, (int, float)):
+        timeout = float(protocol_or_timeout)
+        protocol = "http"
+    else:
+        protocol = str(protocol_or_timeout).lower()
+
+    proxy_url = f"{protocol}://{proxy_str}"
+    proxies = {
+        "http": proxy_url,
+        "https": proxy_url,
+    }
+
     try:
-        ip, port_str = proxy_str.split(":", 1)
-        port = int(port_str)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((ip, port))
-        sock.close()
-        return proxy_str, (result == 0)
+        resp = requests.get(
+            CHECK_TARGET_URL,
+            proxies=proxies,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        if resp.status_code == 200:
+            anonymity = "anonymous"
+            if protocol == "http":
+                try:
+                    data = resp.json()
+                    origin = str(data.get("origin", ""))
+                    # Jika origin mengandung koma, client IP bocor -> transparent
+                    if "," in origin:
+                        anonymity = "transparent"
+                    else:
+                        anonymity = "elite"
+                except Exception:
+                    anonymity = "anonymous"
+            return proxy_str, True, anonymity
     except Exception:
-        return proxy_str, False
+        pass
+    return proxy_str, False, ""
 
 
-def filter_alive_proxies(proxies: Set[str], timeout: float = 1.5, max_workers: int = 150) -> Set[str]:
+def filter_alive_proxies(
+    proxies: Set[str],
+    protocol: str = "http",
+    timeout: float = 2.0,
+    max_workers: int = 150
+) -> Tuple[Set[str], Dict[str, str]]:
     """
-    Memeriksa status aktif proxy secara paralel berkecepatan tinggi.
+    Memeriksa status aktif fungsional proxy secara paralel berkecepatan tinggi.
+    Mengembalikan (alive_set, anonymity_dict).
     """
     alive = set()
+    anonymity_map = {}
     total = len(proxies)
     if total == 0:
-        return alive
+        return alive, anonymity_map
 
-    print(f"[*] Melakukan verifikasi cepat {total} proxy (timeout={timeout}s, threads={max_workers})...", end=" ", flush=True)
+    print(f"[*] Melakukan verifikasi fungsional {total} proxy {protocol.upper()} (timeout={timeout}s, threads={max_workers})...", flush=True)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(check_single_proxy, p, timeout): p for p in proxies}
+        futures = {executor.submit(check_single_proxy, p, protocol, timeout): p for p in proxies}
         for future in as_completed(futures):
             try:
-                proxy_str, is_alive = future.result()
+                proxy_str, is_alive, anon = future.result()
                 if is_alive:
                     alive.add(proxy_str)
+                    if anon:
+                        anonymity_map[proxy_str] = anon
             except Exception:
                 pass
 
-    print(f"[✓ OK] {len(alive)} aktif.")
-    return alive
+    print(f"[✓ OK] {len(alive)} proxy {protocol.upper()} aktif terverifikasi.")
+    return alive, anonymity_map
 
 
 def save_proxy_file(file_path: Path, proxies: Set[str]) -> int:
@@ -220,24 +270,28 @@ def save_proxy_file(file_path: Path, proxies: Set[str]) -> int:
     return len(sorted_proxies)
 
 
-def update_timestamp_file(counts: Dict[str, int], duration: float):
+def save_anonymity_file(file_path: Path, anonymity_data: Dict[str, Dict[str, str]]):
+    """Menyimpan pemetaan tingkat anonimitas proxy ke file JSON terpisah."""
+    now_utc = datetime.now(timezone.utc)
+    summary_by_level: Dict[str, int] = {}
+    for proto_map in anonymity_data.values():
+        for level in proto_map.values():
+            summary_by_level[level] = summary_by_level.get(level, 0) + 1
+
+    payload = {
+        "updated_at_utc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "total_classified": sum(len(v) for v in anonymity_data.values()),
+        "summary": summary_by_level,
+        "anonymity": anonymity_data
+    }
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def update_timestamp_file(counts: Dict[str, int], duration: float, anonymity_summary: Dict[str, int] = None):
     """
     Memperbarui file last_updated.txt dengan format JSON machine-parseable
     diikuti human-readable summary (UTC + WIB).
-
-    Format JSON:
-    {
-      "updated_at_utc": "2025-01-01T00:00:00Z",
-      "updated_at_wib": "2025-01-01T07:00:00+07:00",
-      "duration_seconds": 12.34,
-      "proxy_counts": {
-        "http": 1234,
-        "socks4": 567,
-        "socks5": 890
-      },
-      "total": 2691,
-      "status": "success"
-    }
     """
     now_utc = datetime.now(timezone.utc)
     wib_tz = timezone(timedelta(hours=7))
@@ -245,7 +299,6 @@ def update_timestamp_file(counts: Dict[str, int], duration: float):
 
     total_proxies = sum(counts.values())
 
-    # Machine-parseable JSON block
     json_data = {
         "updated_at_utc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "updated_at_wib": now_wib.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
@@ -258,9 +311,19 @@ def update_timestamp_file(counts: Dict[str, int], duration: float):
         "total": total_proxies,
         "status": "success",
     }
+    if anonymity_summary:
+        json_data["anonymity_summary"] = anonymity_summary
 
     str_utc = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
     str_wib = now_wib.strftime("%Y-%m-%d %H:%M:%S WIB")
+
+    anon_text = ""
+    if anonymity_summary:
+        anon_text = (
+            "Klasifikasi Anonimitas:\n"
+            + "\n".join(f"- {k.capitalize():<16}: {v:>6} proxy" for k, v in sorted(anonymity_summary.items()))
+            + "\n--------------------------------------------------\n"
+        )
 
     content = (
         "### MACHINE-PARSEABLE JSON (parseable by scripts) ###\n"
@@ -279,7 +342,8 @@ def update_timestamp_file(counts: Dict[str, int], duration: float):
         f"- SOCKS4           : {counts.get('socks4', 0):>6} proxy\n"
         f"- SOCKS5           : {counts.get('socks5', 0):>6} proxy\n"
         "--------------------------------------------------\n"
-        f"Total Keseluruhan  : {total_proxies:>6} proxy\n"
+        + anon_text
+        + f"Total Keseluruhan  : {total_proxies:>6} proxy\n"
         "Status Otomasi     : Berhasil Diperbarui\n"
         "══════════════════════════════════════════════════════════════\n"
     )
@@ -288,25 +352,30 @@ def update_timestamp_file(counts: Dict[str, int], duration: float):
         f.write(content)
 
 
-
 def main():
     parser = argparse.ArgumentParser(description="Automated Proxy Scraper & Verifier")
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Lakukan verifikasi konektivitas TCP cepat pada proxy sebelum disimpan"
+        help="Lakukan verifikasi fungsional HTTP GET pada proxy sebelum disimpan"
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=1.5,
-        help="Timeout verifikasi koneksi dalam detik (default: 1.5)"
+        default=2.0,
+        help="Timeout verifikasi fungsional dalam detik (default: 2.0)"
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=120,
         help="Jumlah thread paralel untuk verifikasi (default: 120)"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Batasi jumlah proxy per protokol untuk pengujian cepat"
     )
     args = parser.parse_args()
 
@@ -318,12 +387,22 @@ def main():
 
     session = create_session()
     results: Dict[str, Set[str]] = {}
+    all_anonymity: Dict[str, Dict[str, str]] = {}
 
     # 1. Scrape setiap protokol
     for proto in ["http", "socks4", "socks5"]:
         scraped = scrape_protocol(session, proto)
+        if args.limit and len(scraped) > args.limit:
+            scraped = set(list(scraped)[:args.limit])
         if args.check and scraped:
-            scraped = filter_alive_proxies(scraped, timeout=args.timeout, max_workers=args.workers)
+            scraped, anon_map = filter_alive_proxies(
+                scraped,
+                protocol=proto,
+                timeout=args.timeout,
+                max_workers=args.workers
+            )
+            if anon_map:
+                all_anonymity[proto] = anon_map
         results[proto] = scraped
 
     # 2. Simpan ke file masing-masing
@@ -333,9 +412,16 @@ def main():
     counts["socks4"] = save_proxy_file(BASE_DIR / "socks4.txt", results["socks4"])
     counts["socks5"] = save_proxy_file(BASE_DIR / "socks5.txt", results["socks5"])
 
+    anonymity_summary = {}
+    if all_anonymity:
+        save_anonymity_file(BASE_DIR / "anonymity.json", all_anonymity)
+        for proto_map in all_anonymity.values():
+            for level in proto_map.values():
+                anonymity_summary[level] = anonymity_summary.get(level, 0) + 1
+
     # 3. Update last_updated.txt
     duration = time.time() - start_time
-    update_timestamp_file(counts, duration)
+    update_timestamp_file(counts, duration, anonymity_summary if anonymity_summary else None)
 
     # 4. Ringkasan
     print("\n══════════════════════════════════════════════════════════════")
@@ -345,6 +431,8 @@ def main():
     print(f"  • socks4.txt : {counts['socks4']:>6} proxies")
     print(f"  • socks5.txt : {counts['socks5']:>6} proxies")
     print(f"  • Total      : {sum(counts.values()):>6} proxies")
+    if anonymity_summary:
+        print("  • Anonimitas : " + ", ".join(f"{k}: {v}" for k, v in sorted(anonymity_summary.items())))
     print("══════════════════════════════════════════════════════════════")
     print(f"[✓] Berhasil diperbarui dalam {duration:.2f} detik!\n")
 
