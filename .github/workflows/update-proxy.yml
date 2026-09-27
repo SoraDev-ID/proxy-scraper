@@ -4,10 +4,12 @@ on:
   workflow_dispatch:
   repository_dispatch:
     types: [update-proxy]
+  schedule:
+    - cron: '*/20 * * * *'
 
 concurrency:
   group: proxy-update
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -15,11 +17,12 @@ permissions:
 jobs:
   scrape-and-update:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,8 +45,11 @@ jobs:
           git add http.txt socks4.txt socks5.txt last_updated.txt
           if git diff --staged --quiet; then
             echo "Tidak ada perubahan pada iterasi ini."
-          else
-            git commit -m "chore(auto-update): sync latest proxies [skip ci]"
-            git pull --rebase origin main
-            git push origin main
+            exit 0
           fi
+          git commit -m "chore(auto-update): sync latest proxies [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin main && break
+            echo "push attempt $i failed, retrying in $((i*5))s"
+            sleep $((i*5))
+          done
