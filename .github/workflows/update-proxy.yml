@@ -1,14 +1,13 @@
 name: Automated Proxy Scraper
 
 on:
-  schedule:
-    # Setiap 20 menit — interval realistis yang benar-benar akan dijadwalkan GitHub
-    - cron: '*/20 * * * *'
   workflow_dispatch:
+  repository_dispatch:
+    types: [update-proxy]
 
 concurrency:
   group: proxy-update
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
